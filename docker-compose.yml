@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  ollama-proxy:
+    build: .
+    container_name: ollama-proxy-ldap
+    restart: always
+    ports:
+      - "11451:8000"
+    environment:
+      - OLLAMA_URL=http://10.10.78.119:11434
+      
+      - LDAP_HOST=10.10.64.10
+      - LDAP_PORT=389
+      - LDAP_BASE_DN=dc=ldap,dc=goauthentik,dc=io
+      - CACHE_TTL=1800
