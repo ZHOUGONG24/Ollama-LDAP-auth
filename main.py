@@ -1,6 +1,7 @@
 import os
 import time
 import httpx
+import re
 from typing import Dict
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
@@ -27,6 +28,8 @@ LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "dc=ldap,dc=goauthentik,dc=io")
 CACHE_TTL = int(os.getenv("CACHE_TTL", "1800"))
 token_cache: Dict[str, float] = {}
 
+TOKEN_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$")
+
 def clean_expired_cache():
     current_time = time.time()
     if len(token_cache) > 1000:
@@ -40,7 +43,6 @@ def verify_ldap_dynamic(username: str, password: str) -> bool:
     """
     try:
         user_dn = f"cn={username},ou=users,{LDAP_BASE_DN}"
-        
         server = Server(LDAP_HOST, port=LDAP_PORT)
         conn = Connection(server, user=user_dn, password=password, authentication=SIMPLE, client_strategy=SAFE_SYNC)
         
@@ -50,20 +52,25 @@ def verify_ldap_dynamic(username: str, password: str) -> bool:
         else:
             print(f"LDAP Bind Failed for user '{username}': {conn.result}")
             return False
-            
     except Exception as e:
         print(f"LDAP Connection Error: {e}")
         return False
 
 async def verify_token_split(request: Request):
     """
-    按冒号分割
+    验证
     """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing API Key")
-    
     raw_token = auth_header.split(" ")[1]
+    
+    if len(raw_token) > 256: 
+         raise HTTPException(status_code=400, detail="API Key too long")
+
+    if not TOKEN_PATTERN.match(raw_token):
+        raise HTTPException(status_code=400, detail="Invalid API Key Format. Must be 'username:password' (alphanumeric only)")
+
     current_time = time.time()
     if raw_token in token_cache:
         expiry = token_cache[raw_token]
@@ -72,13 +79,7 @@ async def verify_token_split(request: Request):
         else:
             del token_cache[raw_token]
 
-    if ":" in raw_token:
-        username, password = raw_token.split(":", 1)
-    else:
-        raise HTTPException(status_code=401, detail="Format Error. Please use 'username:password' as API Key")
-
-    if not username or not password:
-         raise HTTPException(status_code=401, detail="Invalid Credentials")
+    username, password = raw_token.split(":", 1)
 
     if verify_ldap_dynamic(username, password):
         token_cache[raw_token] = current_time + CACHE_TTL
