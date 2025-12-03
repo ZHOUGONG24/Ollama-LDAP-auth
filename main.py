@@ -4,14 +4,23 @@ import httpx
 from typing import Dict
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from ldap3 import Server, Connection, SIMPLE, SAFE_SYNC
 import uvicorn
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://host.docker.internal:11434")
 
-LDAP_HOST = os.getenv("LDAP_HOST", "10.10.64.10")
+LDAP_HOST = os.getenv("LDAP_HOST", "localhost")
 LDAP_PORT = int(os.getenv("LDAP_PORT", "389"))
 LDAP_BASE_DN = os.getenv("LDAP_BASE_DN", "dc=ldap,dc=goauthentik,dc=io")
 
@@ -78,7 +87,7 @@ async def verify_token_split(request: Request):
     else:
         raise HTTPException(status_code=403, detail="Invalid Username or Password")
 
-@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE"])
+@app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy_ollama(path: str, request: Request, authorized: bool = Depends(verify_token_split)):
     client = httpx.AsyncClient(base_url=OLLAMA_URL, timeout=300.0)
     url = f"/{path}"
