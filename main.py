@@ -6,6 +6,7 @@ from typing import Dict
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.concurrency import run_in_threadpool
 from ldap3 import Server, Connection, SIMPLE, SAFE_SYNC
 import uvicorn
 
@@ -30,60 +31,57 @@ token_cache: Dict[str, float] = {}
 
 TOKEN_PATTERN = re.compile(r"^[a-zA-Z0-9_-]+:[a-zA-Z0-9_-]+$")
 
-def clean_expired_cache():
-    current_time = time.time()
-    if len(token_cache) > 1000:
-        keys_to_delete = [k for k, v in token_cache.items() if v < current_time]
-        for k in keys_to_delete:
-            del token_cache[k]
-
-def verify_ldap_dynamic(username: str, password: str) -> bool:
-    """
-    LDAP 登录
-    """
+def verify_ldap_sync(username: str, password: str) -> bool:
     try:
         user_dn = f"cn={username},ou=users,{LDAP_BASE_DN}"
-        server = Server(LDAP_HOST, port=LDAP_PORT)
-        conn = Connection(server, user=user_dn, password=password, authentication=SIMPLE, client_strategy=SAFE_SYNC)
-        
+        server = Server(LDAP_HOST, port=LDAP_PORT, connect_timeout=5) 
+        conn = Connection(server, user=user_dn, password=password, authentication=SIMPLE, client_strategy=SAFE_SYNC, receive_timeout=5)
         if conn.bind():
             conn.unbind()
             return True
         else:
-            print(f"LDAP Bind Failed for user '{username}': {conn.result}")
+            # print(f"[LDAP] Bind Failed for user '{username}': {conn.result}")
             return False
     except Exception as e:
-        print(f"LDAP Connection Error: {e}")
+        # print(f"[LDAP] Connection Error: {e}")
         return False
 
+def clean_expired_cache_lazy():
+    if len(token_cache) > 5000:
+        current_time = time.time()
+        keys_to_delete = [k for k, v in token_cache.items() if v < current_time]
+        for k in keys_to_delete:
+            del token_cache[k]
+        # print(f"[Cache] Cleaned {len(keys_to_delete)} expired keys")
+
 async def verify_token_split(request: Request):
-    """
-    验证
-    """
     auth_header = request.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing API Key")
+    
     raw_token = auth_header.split(" ")[1]
     
-    if len(raw_token) > 256: 
-         raise HTTPException(status_code=400, detail="API Key too long")
-
-    if not TOKEN_PATTERN.match(raw_token):
-        raise HTTPException(status_code=400, detail="Invalid API Key Format. Must be 'username:password' (alphanumeric only)")
+    if len(raw_token) > 256 or not TOKEN_PATTERN.match(raw_token):
+        raise HTTPException(status_code=400, detail="Invalid API Key Format")
 
     current_time = time.time()
+    
     if raw_token in token_cache:
         expiry = token_cache[raw_token]
         if current_time < expiry:
             return True
         else:
+            # print(f"[Cache] Expired for token ending in ...{raw_token[-4:]}")
             del token_cache[raw_token]
 
+    # print(f"[Auth] Verifying LDAP for new/expired token...")
     username, password = raw_token.split(":", 1)
+    is_valid = await run_in_threadpool(verify_ldap_sync, username, password)
 
-    if verify_ldap_dynamic(username, password):
+    if is_valid:
         token_cache[raw_token] = current_time + CACHE_TTL
-        clean_expired_cache()
+        clean_expired_cache_lazy()
+        # print(f"[Auth] LDAP success. Cached for {CACHE_TTL}s")
         return True
     else:
         raise HTTPException(status_code=403, detail="Invalid Username or Password")
@@ -92,6 +90,7 @@ async def verify_token_split(request: Request):
 async def proxy_ollama(path: str, request: Request, authorized: bool = Depends(verify_token_split)):
     client = httpx.AsyncClient(base_url=OLLAMA_URL, timeout=300.0)
     url = f"/{path}"
+    
     body = await request.body()
     
     forward_headers = dict(request.headers)
@@ -120,4 +119,4 @@ async def proxy_ollama(path: str, request: Request, authorized: bool = Depends(v
     )
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, workers=1)
